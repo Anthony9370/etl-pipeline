@@ -1,0 +1,11 @@
+# .gitignore
+.env
+venv/
+__pycache__/
+extracted/
+*.parquet
+*.csv
+*.log
+transaction_fees_checkpoint*.txt
+etl_pipeline/transform/
+etl_pipeline/load/
