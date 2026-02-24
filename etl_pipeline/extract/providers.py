@@ -1,33 +1,20 @@
 
+
+from pathlib import Path
 import pandas as pd
 from etl_pipeline.config.database import get_postgres_engine
-from dotenv import load_dotenv
-import logging
-import os
-
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 def extract_providers():
-    query = "SELECT id, name FROM providers"
     engine = get_postgres_engine()
-    chunksize = 20000
-    total_rows = 0
-    for i, chunk in enumerate(pd.read_sql_query(query, engine, chunksize=chunksize)):
-        logging.info(f"Processed chunk {i+1}, rows in this chunk: {len(chunk)}")
-        total_rows += len(chunk)
-        # Process/save chunk here if needed
-    logging.info(f"Extraction complete. Total rows extracted: {total_rows}")
-
-def main():
-    extract_providers()
-
-if __name__ == "__main__":
-    main()
+    query = """
+    SELECT * FROM providers
+    """
+    df = pd.read_sql_query(query, engine)
+    output_dir = Path("extracted/providers")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_name = output_dir / "providers.parquet"
+    df.to_parquet(file_name, index=False, compression="snappy")
+    print(f"Extracted {len(df)} rows to {file_name}")
 
 if __name__ == "__main__":
     extract_providers()
-
-if __name__ == "__main__":
-    main()

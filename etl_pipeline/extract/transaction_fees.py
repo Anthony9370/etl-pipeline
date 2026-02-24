@@ -11,7 +11,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BATCH_DAYS = int(os.getenv("EXTRACTION_BATCH_DAYS", "1"))
-CHUNKSIZE = int(os.getenv("BATCH_CHUNKSIZE", "50000"))
+CHUNKSIZE = int(os.getenv("BATCH_CHUNKSIZE", "5000"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "extracted/transaction_fees"))
 CHECKPOINT_FILE = Path(os.getenv("CHECKPOINT_FILE", "transaction_fees_checkpoint_date.txt"))
 
@@ -41,6 +41,15 @@ def extract_by_date():
         window_end = current + timedelta(days=BATCH_DAYS)
         window_dir = OUTPUT_DIR / current.strftime("%Y-%m-%d")
         window_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if any Parquet file exists for this window
+        existing_files = list(window_dir.glob(f"transaction_fees_{current.date()}_chunk_*.parquet"))
+        if existing_files:
+            logging.info(f"Parquet files already exist for {current.date()}, skipping extraction.")
+            # Still update checkpoint to mark this day as processed
+            write_checkpoint(current)
+            current = window_end
+            continue
 
         query = f"""
             SELECT *

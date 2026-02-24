@@ -1,63 +1,88 @@
 
+
+
+
 import pandas as pd
 from etl_pipeline.config.database import get_postgres_engine
 from dotenv import load_dotenv
 import logging
-from datetime import timedelta
 import os
+from pathlib import Path
+from datetime import timedelta
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-CHECKPOINT_FILE = "transactions_checkpoint.txt"
+BATCH_DAYS = int(os.getenv("EXTRACTION_BATCH_DAYS", "1"))
+CHUNKSIZE = int(os.getenv("BATCH_CHUNKSIZE", "5000"))
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "extracted/transactions"))
+CHECKPOINT_FILE = Path(os.getenv("CHECKPOINT_FILE", "transactions_checkpoint_date.txt"))
 
-def get_last_checkpoint():
-    if os.path.exists(CHECKPOINT_FILE):
-        with open(CHECKPOINT_FILE, "r") as f:
-            return f.read().strip()
+def read_checkpoint():
+    if CHECKPOINT_FILE.exists():
+        return pd.to_datetime(CHECKPOINT_FILE.read_text().strip())
     return None
 
-def save_checkpoint(value):
-    with open(CHECKPOINT_FILE, "w") as f:
-        f.write(str(value))
+def write_checkpoint(dt):
+    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_FILE.write_text(pd.to_datetime(dt).date().isoformat())
 
-def extract_transactions_by_date():
+def extract_by_date():
     engine = get_postgres_engine()
-    last_checkpoint = get_last_checkpoint()
-    if last_checkpoint:
+    rng = pd.read_sql_query("SELECT MIN(transaction_date) AS min_date, MAX(transaction_date) AS max_date FROM transactions", engine)
+    start = pd.to_datetime(rng.loc[0, "min_date"])
+    end = pd.to_datetime(rng.loc[0, "max_date"])
+    if pd.isna(start) or pd.isna(end):
+        logging.info("No data in transactions")
+        return
+
+    last_cp = read_checkpoint()
+    current = last_cp + timedelta(days=1) if last_cp is not None else start
+    total = 0
+
+    while current <= end:
+        window_end = current + timedelta(days=BATCH_DAYS)
+        window_dir = OUTPUT_DIR / current.strftime("%Y-%m-%d")
+        window_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if any Parquet file exists for this window
+        existing_files = list(window_dir.glob(f"transactions_{current.date()}_chunk_*.parquet"))
+        if existing_files:
+            logging.info(f"Parquet files already exist for {current.date()}, skipping extraction.")
+            write_checkpoint(current)
+            current = window_end
+            continue
+
         query = f"""
-            SELECT id, amount, currency, fee_total, platform_fee, provider_fee, net_amount, status,
-                   transaction_date, merchant_id, merchant_account_id, connected_account_id, provider_id,
-                   payment_method_type, card_brand, card_country, card_funding, reconciliation_status,
-                   created_at, updated_at
+            SELECT *
             FROM transactions
-            WHERE updated_at > '{last_checkpoint}'
-            ORDER BY updated_at
+            WHERE transaction_date >= '{current.date()}' AND transaction_date < '{window_end.date()}'
+            ORDER BY transaction_date
         """
-    else:
-        query = """
-            SELECT id, amount, currency, fee_total, platform_fee, provider_fee, net_amount, status,
-                   transaction_date, merchant_id, merchant_account_id, connected_account_id, provider_id,
-                   payment_method_type, card_brand, card_country, card_funding, reconciliation_status,
-                   created_at, updated_at
-            FROM transactions
-            ORDER BY updated_at
-        """
-    chunksize = 20000
-    total_rows = 0
-    for i, chunk in enumerate(pd.read_sql_query(query, engine, chunksize=chunksize)):
-        logging.info(f"Processed chunk {i+1}, rows in this chunk: {len(chunk)}")
-        total_rows += len(chunk)
-        if not chunk.empty:
-            save_checkpoint(chunk['updated_at'].max())
-        # Optionally: chunk.to_csv(f"transactions_chunk_{i+1}.csv", index=False)
-    logging.info(f"Extraction complete. Total rows extracted: {total_rows}")
+
+        rows_this_window = 0
+        try:
+            for i, chunk in enumerate(pd.read_sql_query(query, engine, chunksize=CHUNKSIZE)):
+                n = len(chunk)
+                rows_this_window += n
+                total += n
+                file_name = window_dir / f"transactions_{current.date()}_chunk_{i+1}.parquet"
+                chunk.to_parquet(file_name, index=False, compression="snappy")
+                logging.info(f"Window {current.date()} chunk {i+1}: {n} rows -> {file_name.name}")
+                if "transaction_date" in chunk.columns and not chunk["transaction_date"].isna().all():
+                    last_dt = pd.to_datetime(chunk["transaction_date"]).max()
+                    write_checkpoint(last_dt)
+        except Exception as e:
+            logging.error(f"Error extracting window {current} -> {window_end}: {e}")
+            raise
+
+        logging.info(f"Extracted {rows_this_window} rows for {current.date()} -> {window_end.date()}")
+        current = window_end
+
+    logging.info(f"Extraction complete. Total rows extracted: {total}")
 
 def main():
-    extract_transactions_by_date()
+    extract_by_date()
 
 if __name__ == "__main__":
     main()
-
-if __name__ == "__main__":
-    extract_transactions_by_date()
